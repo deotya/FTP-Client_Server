@@ -1,0 +1,78 @@
+import os
+from pyftpdlib.filesystems import AbstractedFS
+
+class WindowsRootFS(AbstractedFS):
+    """Virtual file system that allows access to all Windows drives"""
+    
+    def __init__(self, root, cmd_channel):
+        super().__init__(root, cmd_channel)
+        # Use a virtual root
+        self.root = "/"
+        self._cwd = "/"
+        self.cmd_channel = cmd_channel
+        
+    def ftp2fs(self, ftppath):
+        """Convert an FTP path to a system path"""
+        print(f"ftp2fs: Converting FTP path: {ftppath}")
+        
+        if ftppath == "/":
+            return self.root
+            
+        # Remove the initial slash
+        if ftppath.startswith("/"):
+            ftppath = ftppath[1:]
+            
+        # Handle the '..' path specially for navigating back
+        if ftppath == "..":
+            # If we're already at root, stay there
+            if self._cwd == "/":
+                return self.root
+                
+            # If we're on a drive (e.g., /C), go back to root
+            if self._cwd.count('/') == 1 and len(self._cwd) == 2:
+                return self.root
+                
+            # Otherwise, go one level up in the Windows directory hierarchy
+            current_fs_path = self.getcwfs()
+            parent_dir = os.path.dirname(current_fs_path)
+            print(f"ftp2fs: Navigating back: {current_fs_path} -> {parent_dir}")
+            return parent_dir
+        
+        # If it doesn't contain path separators and is just a letter, it might be a drive
+        if len(ftppath) == 1 and ftppath.isalpha():
+            # Check if it's a valid drive
+            drive = ftppath.upper() + ":\\"
+            print(f"ftp2fs: Possible drive: {drive}")
+            if os.path.exists(drive):
+                return drive
+                
+        # Check if we're in a subpath of a drive (e.g., C/Users or /C/Users)
+        parts = ftppath.split("/")
+        if parts and len(parts[0]) == 1 and parts[0].isalpha():
+            drive_letter = parts[0].upper()
+            drive_path = drive_letter + ":\\"
+            
+            # If it's just a drive without subfolders
+            if len(parts) == 1:
+                return drive_path
+                
+            # Construct the Windows path for the remaining components
+            rest_path = "\\".join(parts[1:])
+            full_path = os.path.join(drive_path, rest_path)
+            print(f"ftp2fs: Complete path for drive+subdirectories: {full_path}")
+            
+            return full_path
+            
+        # If we're already in a drive folder, treat the path relative to the current directory
+        if self._cwd != "/":
+            # Get the current Windows path
+            current_fs_path = self.getcwfs()
+            
+            # Add the relative path to the current path
+            new_path = os.path.normpath(os.path.join(current_fs_path, ftppath))
+            print(f"ftp2fs: Relative path from {current_fs_path} -> {new_path}")
+            return new_path
+        
+        # Shouldn't reach here, but return the root path for safety
+        print(f"ftp2fs: Unexpected case, returning root for {ftppath}")
+        return self.root

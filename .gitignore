@@ -1,0 +1,23 @@
+*.pyc
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+
+# Ignore virtual environments
+.venv/
+env/
+ENV/
+
+# Ignore configuration files
+.env
+
+# Ignore Visual Studio and Visual Studio Code
+.vs/
+.vscode/
+
+# database
+*.db
+
+# logs
+logs/

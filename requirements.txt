@@ -1,0 +1,7 @@
+PyQt5>=5.15.6
+pyftpdlib==1.5.9
+colorama>=0.4.4
+paramiko>=3.5.0
+cryptography>=45.0.0
+bcrypt>=4.0.0
+pywin32==306
