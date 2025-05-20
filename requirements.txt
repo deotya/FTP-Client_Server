@@ -5,3 +5,4 @@ paramiko>=3.5.0
 cryptography>=45.0.0
 bcrypt>=4.0.0
 pywin32==306
+pyinstaller>=5.7.0
