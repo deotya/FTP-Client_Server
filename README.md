@@ -111,8 +111,8 @@ file_manager
 
 For detailed instructions on creating Windows installers for both the FTP Client and FTP Server components, please refer to the following documentation:
 
-- **FTP Client Installation**: See [CLIENT_README_EN.md](CLIENT_README_EN.md)
-- **FTP Server Installation**: See [SERVER_README_EN.md](SERVER_README_EN.md)
+- **FTP Client Installation**: See [CLIENT_README.md](CLIENT_README.md)
+- **FTP Server Installation**: See [SERVER_README.md](SERVER_README.md)
 
 These files contain step-by-step instructions for creating standalone Windows executables and installers that will automatically install the applications on disk C.
 
