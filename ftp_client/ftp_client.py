@@ -9,6 +9,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThread
 import threading
 import socket
 import time
+from ftp_client.utils.logger import FTPLogger
 
 class FTPClient(QObject):
     """Class for managing FTP connections"""
@@ -29,6 +30,9 @@ class FTPClient(QObject):
         self.current_directory = "/"
         self.active_threads = []  # List to hold references to active threads
         self.connection_id = None  # Connection ID from the database
+        self.host = None
+        self.port = None
+        self.logger = FTPLogger()  # Inițializează logger-ul
         
     def __del__(self):
         """Destructor to ensure all threads are properly stopped"""
@@ -39,22 +43,46 @@ class FTPClient(QObject):
         except:
             pass
         
+        # Închide logger-ul când obiectul este distrus
+        if hasattr(self, 'logger'):
+            self.logger.close()
+        
     def connect(self, host, port=21, username="anonymous", password="", timeout=30):
         """
         Connect to the FTP server
         Returns True if connected successfully, False otherwise
         """
-        print(f"FTPClient.connect: Attempting to connect to {host}:{port} with {username}")
+        self.logger.start_logging(host, port, username)
+        self.logger.log(f"FTPClient.connect: Attempting to connect to {host}:{port} with {username}")
+        
         try:
             # Close any existing connection
             if self.ftp:
                 try:
+                    self.logger.log(f"FTPClient.connect: Closing existing connection before connecting to {host}")
                     self.ftp.quit()
                 except:
-                    pass
+                    try:
+                        self.ftp.close()
+                    except:
+                        pass
                 self.ftp = None
                 self.is_connected = False
-                
+                # Curățăm și thread-urile active
+                for thread in self.active_threads[:]:
+                    try:
+                        if thread.isRunning():
+                            thread.wait(500)  # Wait up to 0.5 seconds
+                        self.active_threads.remove(thread)
+                    except:
+                        pass
+                # Golim lista de thread-uri active
+                self.active_threads.clear()
+            
+            # Salvăm host și port pentru utilizare ulterioară
+            self.host = host
+            self.port = port
+            
             # Create a new connection
             self.ftp = ftplib.FTP()
             self.ftp.connect(host, port, timeout)
@@ -68,11 +96,28 @@ class FTPClient(QObject):
                 # Set passive mode
                 self.ftp.set_pasv(True)
                 
-                print(f"FTPClient.connect: Successfully connected to {host}, current directory: {self.current_directory}")
+                # Verificăm conexiunea pentru a ne asigura că este încă activă
+                try:
+                    self.ftp.voidcmd("NOOP")
+                    self.logger.log(f"FTPClient.connect: Connection check passed for {host}")
+                except:
+                    self.logger.log(f"FTPClient.connect: Connection check failed for {host}, reconnecting...")
+                    try:
+                        self.ftp.close()
+                    except:
+                        pass
+                    # Încercăm să reconectăm
+                    self.ftp = ftplib.FTP()
+                    self.ftp.connect(host, port, timeout)
+                    self.ftp.login(username, password)
+                    self.ftp.set_pasv(True)
+                    self.current_directory = self.ftp.pwd()
+                
+                self.logger.log(f"FTPClient.connect: Successfully connected to {host}, current directory: {self.current_directory}")
                 self.connected.emit(f"Connected to {host}:{port}")
                 return True
             except ftplib.error_perm as e:
-                print(f"FTPClient.connect: Authentication error: {str(e)}")
+                self.logger.log(f"FTPClient.connect: Authentication error: {str(e)}")
                 # Check if the error is 530 (authentication failed)
                 if "530" in str(e):
                     self.error.emit(f"Authentication failed: incorrect username or password")
@@ -82,21 +127,30 @@ class FTPClient(QObject):
                 return False
                 
         except socket.gaierror:
-            self.error.emit(f"Could not resolve hostname: {host}")
+            error_msg = f"Could not resolve hostname: {host}"
+            self.logger.log(f"FTPClient.connect: Error: {error_msg}")
+            self.error.emit(error_msg)
             return False
         except socket.timeout:
-            self.error.emit(f"Connection timed out. Check the address and port.")
+            error_msg = f"Connection timed out. Check the address and port."
+            self.logger.log(f"FTPClient.connect: Error: {error_msg}")
+            self.error.emit(error_msg)
             return False
         except ConnectionRefusedError:
-            self.error.emit(f"Connection refused. Check if the FTP server is running.")
+            error_msg = f"Connection refused. Check if the FTP server is running."
+            self.logger.log(f"FTPClient.connect: Error: {error_msg}")
+            self.error.emit(error_msg)
             return False
         except Exception as e:
-            self.error.emit(f"Connection error: {str(e)}")
+            error_msg = f"Connection error: {str(e)}"
+            self.logger.log(f"FTPClient.connect: Error: {error_msg}")
+            self.error.emit(error_msg)
             return False
             
     def disconnect(self):
         """Disconnect from the FTP server"""
         if self.ftp and self.is_connected:
+            self.logger.log("FTPClient.disconnect: Disconnecting from server")
             try:
                 self.ftp.quit()
             except:
@@ -105,6 +159,9 @@ class FTPClient(QObject):
                 self.is_connected = False
                 self.ftp = None
                 self.disconnected.emit()
+                self.logger.log("FTPClient.disconnect: Disconnected successfully")
+                # Închide logger-ul la deconectare
+                self.logger.close()
                 
     def list_directory(self, directory=None):
         """List files in the current or specified directory"""
@@ -114,10 +171,10 @@ class FTPClient(QObject):
             
         try:
             if directory:
-                print(f"FTPClient: Listing specified directory: {directory}")
+                self.logger.log(f"FTPClient: Listing specified directory: {directory}")
                 self.ftp.cwd(directory)
                 self.current_directory = self.ftp.pwd()
-                print(f"FTPClient: Current directory updated: {self.current_directory}")
+                self.logger.log(f"FTPClient: Current directory updated: {self.current_directory}")
             
             # Get the list of files and directories
             file_list = []
@@ -132,12 +189,13 @@ class FTPClient(QObject):
                 parsed_list = self._parse_regular_directory(file_list)
                     
             self.directory_listed.emit(parsed_list)
+            self.logger.log(f"FTPClient: Listed directory {self.current_directory} with {len(parsed_list)} items")
             return parsed_list
         except ftplib.error_perm as e:
             error_msg = str(e)
             # Check if the message is actually a confirmation (250 Command successful)
             if "250" in error_msg and ("current directory" in error_msg.lower() or "successful" in error_msg):
-                print(f"FTPClient: Confirmation message received (not an error): {error_msg}")
+                self.logger.log(f"FTPClient: Confirmation message received (not an error): {error_msg}")
                 # Try again to list the current directory
                 try:
                     # Get the list of files and directories again
@@ -147,18 +205,19 @@ class FTPClient(QObject):
                     # Parse the list and emit the signal
                     parsed_list = self._parse_regular_directory(file_list)
                     self.directory_listed.emit(parsed_list)
+                    self.logger.log(f"FTPClient: Listed directory {self.current_directory} with {len(parsed_list)} items (second attempt)")
                     return parsed_list
                 except Exception as inner_e:
-                    print(f"FTPClient: Secondary error during listing: {str(inner_e)}")
+                    self.logger.log(f"FTPClient: Secondary error during listing: {str(inner_e)}")
                     self.error.emit(f"Error listing directory: {str(inner_e)}")
                     return []
             else:
-                print(f"FTPClient: Permission error during listing: {error_msg}")
+                self.logger.log(f"FTPClient: Permission error during listing: {error_msg}")
                 self.error.emit(f"Error listing directory: {error_msg}")
                 return []
         except Exception as e:
             error_msg = f"Error listing directory: {str(e)}"
-            print(f"FTPClient: {error_msg}")
+            self.logger.log(f"FTPClient: {error_msg}")
             self.error.emit(error_msg)
             return []
             
@@ -331,11 +390,12 @@ class FTPClient(QObject):
             return False
             
         try:
+            self.logger.log(f"FTPClient: Downloading {remote_file} to {local_path}")
             # Create all necessary directories
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             
             # Start a thread for downloading
-            download_thread = DownloadThread(self.ftp, remote_file, local_path)
+            download_thread = DownloadThread(self.ftp, remote_file, local_path, self.logger)
             download_thread.download_complete.connect(
                 lambda file: (self.file_downloaded.emit(file), self.clean_thread(download_thread))
             )
@@ -349,7 +409,9 @@ class FTPClient(QObject):
             download_thread.start()
             return True
         except Exception as e:
-            self.error.emit(f"Error initiating download: {str(e)}")
+            error_msg = f"Error initiating download: {str(e)}"
+            self.logger.log(f"FTPClient: {error_msg}")
+            self.error.emit(error_msg)
             return False
             
     def upload_file(self, local_file, remote_dir=None):
@@ -363,8 +425,10 @@ class FTPClient(QObject):
             if remote_dir is None:
                 remote_dir = self.current_directory
                 
+            self.logger.log(f"FTPClient: Uploading {local_file} to {remote_dir}")
+            
             # Start a thread for uploading
-            upload_thread = UploadThread(self.ftp, local_file, remote_dir)
+            upload_thread = UploadThread(self.ftp, local_file, remote_dir, self.logger)
             upload_thread.upload_complete.connect(
                 lambda file: (self.file_uploaded.emit(file), self.clean_thread(upload_thread))
             )
@@ -378,7 +442,9 @@ class FTPClient(QObject):
             upload_thread.start()
             return True
         except Exception as e:
-            self.error.emit(f"Error initiating upload: {str(e)}")
+            error_msg = f"Error initiating upload: {str(e)}"
+            self.logger.log(f"FTPClient: {error_msg}")
+            self.error.emit(error_msg)
             return False
             
     def _make_dirs(self, path):
@@ -413,33 +479,37 @@ class FTPClient(QObject):
     def delete_file(self, filename):
         """Delete a file from the server"""
         if not self.is_connected:
-            self.error.emit("You are not connected to an FTP server")
+            self.logger.log("FTPClient: delete_file: You are not connected to an FTP server")
             return False
             
         try:
             self.ftp.delete(filename)
+            self.logger.log(f"FTPClient: delete_file: Successfully deleted file: {filename}")
             return True
         except Exception as e:
-            self.error.emit(f"Error deleting file: {str(e)}")
+            self.logger.log(f"FTPClient: delete_file: Error deleting file: {str(e)}")
             return False
             
     def delete_directory(self, directory_name):
         """Delete a directory from the server"""
         if not self.is_connected:
+            self.logger.log("FTPClient: delete_directory: You are not connected to an FTP server")
             self.error.emit("You are not connected to an FTP server")
             return False
             
         try:
             self.ftp.rmd(directory_name)
+            self.logger.log(f"FTPClient: delete_directory: Successfully deleted directory: {directory_name}")
             return True
         except Exception as e:
+            self.logger.log(f"FTPClient: delete_directory: Error deleting directory: {str(e)}")
             self.error.emit(f"Error deleting directory: {str(e)}")
             return False
     
     def list_root_drives(self):
         """List root drives"""
         if not self.is_connected:
-            self.error.emit("You are not connected to an FTP server")
+            self.logger.log("FTPClient: list_root_drives: You are not connected to an FTP server")
             return []
             
         try:
@@ -533,17 +603,17 @@ class FTPClient(QObject):
             return drives
         except Exception as e:
             error_msg = f"Error listing root drives: {str(e)}"
-            print(f"FTPClient: {error_msg}")
+            self.logger.log(f"FTPClient: {error_msg}")
             self.error.emit(error_msg)
             return []
             
     def navigate_to_ftp_path(self, path):
         """Navigate to a specified FTP path"""
         if not self.is_connected:
-            self.error.emit("You are not connected to an FTP server")
+            self.logger.log("FTPClient: navigate_to_ftp_path: You are not connected to an FTP server")
             return False
             
-        print(f"FTPClient.navigate_to_ftp_path: Attempting to navigate to {path}")
+        self.logger.log(f"FTPClient.navigate_to_ftp_path: Attempting to navigate to {path}")
         
         try:
             # Check if it's a Windows path (e.g., C:\...)
@@ -554,13 +624,13 @@ class FTPClient(QObject):
             # Try to navigate to the specified path
             self.ftp.cwd(path)
             self.current_directory = self.ftp.pwd()
-            print(f"FTPClient.navigate_to_ftp_path: Successfully navigated to {self.current_directory}")
+            self.logger.log(f"FTPClient.navigate_to_ftp_path: Successfully navigated to {self.current_directory}")
             
             # List the directory contents
             self.list_directory()
             return True
         except Exception as e:
-            print(f"FTPClient.navigate_to_ftp_path: Navigation error - {str(e)}")
+            self.logger.log(f"FTPClient.navigate_to_ftp_path: Navigation error - {str(e)}")
             self.error.emit(f"Navigation error: {str(e)}")
             return False
 
@@ -576,23 +646,35 @@ class DownloadThread(QThread):
     download_error = pyqtSignal(str)
     progress_updated = pyqtSignal(int)
     
-    def __init__(self, ftp, remote_file, local_path):
+    def __init__(self, ftp, remote_file, local_path, logger=None):
         super().__init__()
         self.ftp = ftp
         self.remote_file = remote_file
         self.local_path = local_path
+        self.logger = logger
         
     def run(self):
         try:
+            if self.logger:
+                self.logger.log(f"DownloadThread: Starting download of {self.remote_file}")
+                
             # Open the local file for writing
             with open(self.local_path, 'wb') as local_file:
                 # Download the file
                 self.ftp.retrbinary(f'RETR {self.remote_file}', local_file.write)
             
+            if self.logger:
+                self.logger.log(f"DownloadThread: Successfully downloaded {self.remote_file} to {self.local_path}")
+                
             # Emit signal when download is complete
             self.download_complete.emit(self.local_path)
         except Exception as e:
-            self.download_error.emit(f"Download error: {str(e)}")
+            error_msg = f"Download error: {str(e)}"
+            
+            if self.logger:
+                self.logger.log(f"DownloadThread: {error_msg}")
+                
+            self.download_error.emit(error_msg)
 
 
 class UploadThread(QThread):
@@ -601,15 +683,19 @@ class UploadThread(QThread):
     upload_error = pyqtSignal(str)
     progress_updated = pyqtSignal(int)
     
-    def __init__(self, ftp, local_file, remote_dir):
+    def __init__(self, ftp, local_file, remote_dir, logger=None):
         super().__init__()
         self.ftp = ftp
         self.local_file = local_file
         self.remote_dir = remote_dir
+        self.logger = logger
         
     def run(self):
         current_dir = None
         try:
+            if self.logger:
+                self.logger.log(f"UploadThread: Starting upload of {self.local_file} to {self.remote_dir}")
+                
             # Check if the file exists
             if not os.path.exists(self.local_file):
                 raise FileNotFoundError(f"The file {self.local_file} does not exist")
@@ -643,12 +729,18 @@ class UploadThread(QThread):
             except Exception as e:
                 raise Exception(f"Could not open the file {self.local_file}: {str(e)}")
             
+            if self.logger:
+                self.logger.log(f"UploadThread: Successfully uploaded {self.local_file} to {self.remote_dir}/{filename}")
+                
             # Emit signal when upload is complete
             self.upload_complete.emit(self.local_file)
             
         except Exception as e:
             error_message = f"Upload error: {str(e)}"
-            print(f"UploadThread: {error_message}")
+            
+            if self.logger:
+                self.logger.log(f"UploadThread: {error_message}")
+                
             self.upload_error.emit(error_message)
         finally:
             # Ensure we return to the initial directory

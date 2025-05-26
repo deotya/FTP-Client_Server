@@ -7,9 +7,9 @@ from datetime import datetime
 import re
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, 
                             QLabel, QMessageBox, QToolBar, QMenu, QTabWidget, QTableWidget, 
-                            QTableWidgetItem, QHeaderView)
+                            QTableWidgetItem, QHeaderView, QTextEdit, QSplitter)
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor
 
 from ftp_client.ui.local_panel import LocalPanel
 from ftp_client.ui.ftp_panel import FTPPanel
@@ -28,7 +28,7 @@ class FileManager(QMainWindow):
     def init_ui(self):
         """Initialize user interface"""
         # Configure window
-        self.setWindowTitle('File Manager')
+        self.setWindowTitle('FTP Client')
         self.setGeometry(100, 100, 1200, 800)
         
         # Create the top toolbar for FTP connection buttons
@@ -172,9 +172,28 @@ class FileManager(QMainWindow):
             
     def handle_disconnect_clicked(self):
         """Handler for disconnect button click"""
-        if hasattr(self, 'ftp_panel') and self.ftp_panel:
-            self.ftp_panel.disconnect()
+        # Asigură-te că cursorul este normal
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import Qt
+        QApplication.restoreOverrideCursor()
         
+        if hasattr(self, 'ftp_panel') and self.ftp_panel:
+            # Verificăm dacă există un thread de conectare în desfășurare și îl oprim
+            if hasattr(self.ftp_panel, 'connection_thread') and self.ftp_panel.connection_thread and self.ftp_panel.connection_thread.isRunning():
+                try:
+                    # Anulăm thread-ul de conectare
+                    self.ftp_panel.connection_thread.terminate()
+                    self.ftp_panel.connection_thread.wait(1000)  # Așteptăm maxim 1 secundă
+                    self.show_message("Încercare de conectare anulată", "warning")
+                except Exception as e:
+                    self.show_message(f"Nu s-a putut anula conexiunea: {str(e)}", "error")
+            
+            # Deconectăm clientul FTP
+            self.ftp_panel.disconnect()
+            
+            # Actualizăm starea butoanelor
+            self.update_connection_status(False, "Deconectat")
+
     def create_central_panel(self):
         """Create the central panel with transfer buttons"""
         central_panel = QWidget()
@@ -279,10 +298,18 @@ class FileManager(QMainWindow):
     def closeEvent(self, event):
         """Ensure all connections are properly closed when the application is closed"""
         try:
+            # Oprește timer-ul de actualizare a logurilor
+            if hasattr(self, 'log_timer') and self.log_timer.isActive():
+                self.log_timer.stop()
+                
             # Disconnect FTP to avoid abandoned threads
             if hasattr(self, 'ftp_panel') and self.ftp_panel and hasattr(self.ftp_panel, 'ftp_client'):
                 if self.ftp_panel.ftp_client and self.ftp_panel.ftp_client.is_connected:
                     self.ftp_panel.ftp_client.disconnect()
+                    
+            # Close the application log
+            from ftp_client.utils.logger import FTPLogger
+            FTPLogger.close_app_log()
         except Exception as e:
             print(f"Error closing application: {str(e)}")
         
@@ -330,11 +357,24 @@ class FileManager(QMainWindow):
         self.transfer_tabs.addTab(self.successful_transfers, "Successful Transfers")
         self.transfer_tabs.addTab(self.failed_transfers, "Failed Transfers")
         
+        # Create the widget for displaying logs
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
+        self.log_viewer.setStyleSheet("QTextEdit { font-family: 'Courier New'; font-size: 9pt; background-color: #f5f5f5; }")
+        
+        # Add tab for logs (without control menu)
+        self.transfer_tabs.addTab(self.log_viewer, "Messages log")
+        
+        # Timer for automatically updating logs (every 2 seconds)
+        self.log_timer = QTimer(self)
+        self.log_timer.timeout.connect(self.refresh_logs)
+        self.log_timer.start(2000)  # 2 seconds
+        
         # Add tabs to layout
         message_layout.addWidget(self.transfer_tabs)
         
         # Calculate height as 70% of the initial value of 150 pixels
-        new_height = 200  # Approximately 105 pixels
+        new_height = 250  # Slightly increase the container height
         
         # Set the message container height
         self.message_container.setMinimumHeight(new_height)
@@ -351,6 +391,97 @@ class FileManager(QMainWindow):
             "successful": [],
             "failed": []
         }
+        
+        # Initialize log display
+        self.refresh_logs()
+
+    def refresh_logs(self):
+        """Load and display log messages only from the most recent log file"""
+        try:
+            # Get the path to the ftp_log directory
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "ftp_log")
+            
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+                self.log_viewer.setText("No logs available. Connect to an FTP server to view logs.")
+                return
+                
+            # Get the list of files and sort them by modification date (most recent first)
+            log_files = [(f, os.path.getmtime(os.path.join(log_dir, f))) 
+                        for f in os.listdir(log_dir) 
+                        if f.endswith('.txt') and f.startswith('ftp_client_log_')]
+            
+            if not log_files:
+                self.log_viewer.setText("No logs available. Connect to an FTP server to view logs.")
+                return
+            
+            # Check if the application has just started (first run of refresh_logs)
+            if not hasattr(self, '_logs_initialized'):
+                self._logs_initialized = True
+                self.log_viewer.setText("The application is ready. Connect to an FTP server to view connection logs.")
+                return
+                
+            # Sort files by modification date (most recent first)
+            log_files.sort(key=lambda x: x[1], reverse=True)
+            
+            # Select only the most recent log file
+            latest_log_file = log_files[0][0]
+            latest_log_path = os.path.join(log_dir, latest_log_file)
+            
+            # Preserve the current scroll position
+            scrollbar = self.log_viewer.verticalScrollBar()
+            scroll_position = scrollbar.value()
+            was_at_bottom = scroll_position == scrollbar.maximum() or scrollbar.value() == 0
+            
+            # Read the content of the most recent log file
+            try:
+                with open(latest_log_path, 'r', encoding='utf-8') as f:
+                    log_lines = f.readlines()
+                    # Limit to the last 1000 lines for performance
+                    if len(log_lines) > 1000:
+                        log_lines = log_lines[-1000:]
+            except Exception:
+                log_lines = []
+                
+            # If the number of lines hasn't changed, don't update (to avoid flickering)
+            if hasattr(self, '_log_lines_count') and self._log_lines_count == len(log_lines):
+                # Restore the scroll position
+                if not was_at_bottom:
+                    scrollbar.setValue(scroll_position)
+                return
+                
+            # Store the number of lines
+            self._log_lines_count = len(log_lines)
+            
+            # Clear the viewer
+            self.log_viewer.clear()
+            
+            # Display the lines with colored formatting
+            for line in log_lines:
+                line = line.strip()
+                color = QColor(0, 0, 0)  # default color: black
+                
+                if "Error" in line or "error" in line or "failed" in line or "Failed" in line:
+                    color = QColor(200, 0, 0)  # roșu
+                elif "Warning" in line or "WARNING" in line:
+                    color = QColor(255, 140, 0)  # portocaliu
+                elif "Success" in line or "success" in line or "downloaded" in line or "uploaded" in line:
+                    color = QColor(0, 128, 0)  # verde
+                elif "Attempting" in line or "connecting" in line or "Connecting" in line:
+                    color = QColor(128, 128, 0)  # galben închis
+                
+                self.log_viewer.setTextColor(color)
+                self.log_viewer.append(line)
+            
+            # Restore the scroll position or scroll to the end if it was already at the end
+            if was_at_bottom:
+                scrollbar.setValue(scrollbar.maximum())
+            else:
+                scrollbar.setValue(scroll_position)
+                
+        except Exception as e:
+            # Capture all errors to prevent application crash
+            print(f"Error loading logs: {str(e)}")
 
     def show_message(self, message, message_type="info", auto_clear=True, timeout=5000):
         """Display a message and update the transfer tables
@@ -361,6 +492,7 @@ class FileManager(QMainWindow):
             auto_clear (bool): Whether the message should be automatically cleared after a time
             timeout (int): The time in milliseconds after which the message will be automatically cleared
         """
+        # Doar actualizăm tabelele de transfer fără alte funcționalități
         if "download" in message.lower() or "upload" in message.lower() or "copy" in message.lower():
             if "success" in message_type or "successfully" in message.lower():
                 self.add_transfer_to_table("successful", message)
@@ -485,4 +617,30 @@ class FileManager(QMainWindow):
     def clear_message(self):
         """Clear the message from the waiting area"""
         # Do nothing, keep the transfer history
+        pass 
+
+    def open_log_folder(self):
+        """Deschide folderul cu fișiere de log în exploratorul de fișiere"""
+        try:
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "ftp_log")
+            
+            if os.path.exists(log_dir):
+                # Deschide folderul în exploratorul de fișiere
+                import subprocess, platform
+                
+                if platform.system() == "Windows":
+                    os.startfile(log_dir)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.Popen(["open", log_dir])
+                else:  # Linux
+                    subprocess.Popen(["xdg-open", log_dir])
+        except Exception as e:
+            self.log_viewer.append(f"Eroare la deschiderea folderului: {str(e)}") 
+
+    def refresh_log_file_list(self):
+        """Metodă păstrată pentru compatibilitate cu codul existent"""
+        self.refresh_logs()
+            
+    def load_selected_log(self):
+        """Metodă păstrată pentru compatibilitate cu codul existent"""
         pass 

@@ -1,47 +1,8 @@
-# Ignore all virtual environments
-**/.venv/
-**/venv/
-**/__pycache__/
-**/*.py[cod]
-**/*.pyo
-
-# Ignore common IDE/editor folders
-.vscode/
-.idea/
-*.sublime-project
-*.sublime-workspace
-
-# Ignore OS files
-.DS_Store
-Thumbs.db
-
-# Ignore log and temp files
-*.log
-*.tmp
-*.bak
-*.swp
-*.~*
-
-# Byte-compiled / optimized / DLL files
 *.pyc
+*.pyo
 *.pyd
-*.pdb
-*.so
-
-# Ignore test coverage files
-htmlcov/
-.tox/
-.nox/
-coverage.*
-.cache
-.pytest_cache/
-
-# Ignore distribution / packaging
-dist/
-build/
-*.egg-info/
 *.egg
-*.whl
+*.egg-info/
 
 # Ignore virtual environments
 .venv/
@@ -50,7 +11,7 @@ ENV/
 
 # Ignore configuration files
 .env
-.env.*
+
 # Ignore Visual Studio and Visual Studio Code
 .vs/
 .vscode/
@@ -60,5 +21,5 @@ ENV/
 
 # logs
 logs/
-#build
 dist
+ftp_log

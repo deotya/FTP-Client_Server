@@ -6,8 +6,8 @@ import os
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QListWidget, QListWidgetItem, QPushButton,
                              QMessageBox, QFileDialog, QMenu, QAction, QInputDialog,
-                             QDialog, QMainWindow)
-from PyQt5.QtCore import Qt, QTimer
+                             QDialog, QMainWindow, QApplication)
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from ftp_client import FTPClient
@@ -215,58 +215,171 @@ class FTPPanel(QWidget):
     def connect_to_ftp(self, host, port, username, password, key_file=None, key_passphrase=None):
         """Connect to FTP/SFTP server"""
         self.status_label.setText("Connecting...")
-
-        # Check connection type
-        if hasattr(self, 'connection_type') and self.connection_type == 'sftp':
-            # For SFTP, we can use private key authentication
-            if key_file:
-                self.status_label.setText(
-                    f"Connecting with private key to {host}:{port}...")
-                if key_passphrase:
-                    key_info = " (with passphrase)"
-                else:
-                    key_info = ""
-                self.status_label.setText(
-                    f"Connecting with private key{key_info} to {host}:{port}...")
-
+        
+        # Verificăm dacă există o încercare de conectare în progres
+        if hasattr(self, 'connection_thread') and self.connection_thread and self.connection_thread.isRunning():
+            # Încercăm să anulăm vechiul thread de conectare
             try:
-                success = self.ftp_client.connect(
-                    host,
-                    port,
-                    username,
-                    password,
-                    key_file=key_file,
-                    key_passphrase=key_passphrase
-                )
+                self.status_label.setText("Anulare conexiune anterioară...")
+                self.connection_thread.terminate()
+                self.connection_thread.wait(1000)  # Așteptăm maxim 1 secundă
+                self.show_message("Încercare de conectare anterioară anulată", "warning")
+                # Restaurăm cursorul normal dacă a fost în mod de așteptare
+                QApplication.restoreOverrideCursor()
             except Exception as e:
-                self.status_label.setText(f"Connection error: {str(e)}")
-                self.show_message(f"Connection error: {str(e)}", "error", auto_clear=False)
-                return False
-        else:
-            # For standard FTP
+                self.show_message(f"Nu s-a putut anula conexiunea anterioară: {str(e)}", "error")
+                # Restaurăm cursorul normal în caz de eroare
+                QApplication.restoreOverrideCursor()
+        
+        # Close any existing connection before trying to connect to a new one
+        if hasattr(self, 'ftp_client') and self.ftp_client and self.ftp_client.is_connected:
+            self.status_label.setText("Închidere conexiune existentă...")
             try:
-                success = self.ftp_client.connect(host, port, username, password)
+                self.ftp_client.disconnect()
+                # Wait briefly for threads to close
+                import time
+                time.sleep(0.5)
             except Exception as e:
-                self.status_label.setText(f"Connection error: {str(e)}")
-                self.show_message(f"Connection error: {str(e)}", "error", auto_clear=False)
-                return False
+                self.show_message(f"Eroare la închiderea conexiunii: {str(e)}", "error")
+                # Restaurăm cursorul normal în caz de eroare
+                QApplication.restoreOverrideCursor()
+        
+        # Add visual indicator that the application is working
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        
+        self.show_message(f"Connecting to {host}:{port}...", "info")
 
+        # Create a connection thread to avoid blocking the UI
+        class ConnectionThread(QThread):
+            connection_result = pyqtSignal(bool, str)
+            
+            def __init__(self, parent, ftp_client, host, port, username, password, key_file=None, key_passphrase=None):
+                super().__init__(parent)
+                self.ftp_client = ftp_client
+                self.host = host
+                self.port = port
+                self.username = username
+                self.password = password
+                self.key_file = key_file
+                self.key_passphrase = key_passphrase
+                self.connection_type = getattr(parent, 'connection_type', 'ftp')
+                # Adăugăm un flag pentru a verifica dacă thread-ul este anulat manual
+                self.is_cancelled = False
+                
+            def run(self):
+                try:
+                    if self.is_cancelled:
+                        self.connection_result.emit(False, "Connection cancelled by user")
+                        return
+                        
+                    # Setăm un timeout pentru conexiune
+                    import socket
+                    old_timeout = socket.getdefaulttimeout()
+                    socket.setdefaulttimeout(15)  # Timeout de 15 secunde pentru conectare
+                    
+                    try:
+                        if self.connection_type == 'sftp' and self.key_file:
+                            success = self.ftp_client.connect(
+                                self.host,
+                                self.port,
+                                self.username,
+                                self.password,
+                                key_file=self.key_file,
+                                key_passphrase=self.key_passphrase
+                            )
+                        else:
+                            success = self.ftp_client.connect(self.host, self.port, self.username, self.password)
+                        
+                        if self.is_cancelled:
+                            # Dacă s-a anulat între timp, ne deconectăm
+                            if success and self.ftp_client.is_connected:
+                                self.ftp_client.disconnect()
+                            self.connection_result.emit(False, "Connection cancelled by user")
+                        else:
+                            self.connection_result.emit(success, "")
+                    finally:
+                        # Resetăm timeout-ul la valoarea inițială
+                        socket.setdefaulttimeout(old_timeout)
+                        
+                except socket.timeout:
+                    self.connection_result.emit(False, "Connection timed out. Check the address and port.")
+                except Exception as e:
+                    if not self.is_cancelled:
+                        self.connection_result.emit(False, str(e))
+                        
+            def terminate(self):
+                """Suprascriem metoda terminate pentru a seta flag-ul de anulare"""
+                self.is_cancelled = True
+                super().terminate()
+
+        # Create and start the connection thread
+        self.connection_thread = ConnectionThread(
+            self, self.ftp_client, host, port, username, password, key_file, key_passphrase
+        )
+        
+        # Connect the result signal
+        self.connection_thread.connection_result.connect(self.handle_connection_result)
+        
+        # Adăugăm un timer pentru a verifica timeout-ul conexiunii (după 20 de secunde)
+        connection_timeout = QTimer(self)
+        connection_timeout.setSingleShot(True)
+        connection_timeout.timeout.connect(self._connection_timeout)
+        connection_timeout.start(20000)  # 20 secunde
+        
+        # Salvăm referința la timer pentru a-l putea opri când conexiunea este stabilită
+        self.connection_timeout_timer = connection_timeout
+        
+        # Start the thread
+        self.connection_thread.start()
+
+        # Return True to indicate that the connection attempt has started
+        return True
+        
+    def _connection_timeout(self):
+        """Handler pentru timeout-ul conexiunii"""
+        # Verificăm dacă încă există un thread de conectare
+        if hasattr(self, 'connection_thread') and self.connection_thread and self.connection_thread.isRunning():
+            # Oprim thread-ul
+            try:
+                self.connection_thread.terminate()
+                self.connection_thread.wait(1000)
+                
+                # Resetăm cursorul
+                QApplication.restoreOverrideCursor()
+                
+                # Afișăm mesajul
+                self.status_label.setText("Connection timed out")
+                self.show_message("Connection timed out. Check the address and port.", "error", auto_clear=False)
+            except Exception as e:
+                self.show_message(f"Error handling connection timeout: {str(e)}", "error")
+                QApplication.restoreOverrideCursor()
+
+    def handle_connection_result(self, success, error_message):
+        """Handle the asynchronous connection result"""
+        # Oprim timer-ul de timeout
+        if hasattr(self, 'connection_timeout_timer') and self.connection_timeout_timer.isActive():
+            self.connection_timeout_timer.stop()
+            
+        # Restore the normal cursor
+        QApplication.restoreOverrideCursor()
+        
         if success:
-            # Update status in UI, but do not call list_directory here
-            # it will be called from on_connected
-            self.status_label.setText(f"Connected to {host}:{port}")
-
-            # Store the connection ID in the client object for later use
+            # Update the status in the UI
+            self.status_label.setText(f"Connected to {self.ftp_client.host}:{self.ftp_client.port}")
+            
+            # Stochează ID-ul conexiunii în obiectul client pentru utilizare ulterioară
             if hasattr(self, 'connection_id'):
                 self.ftp_client.connection_id = self.connection_id
-
-            return True
         else:
             self.status_label.setText("Connection error")
-            return False
+            if error_message:
+                self.show_message(f"Connection error: {error_message}", "error", auto_clear=False)
 
     def disconnect(self):
         """Disconnect the FTP client and update the user interface"""
+        # Asigură-te că cursorul este normal
+        QApplication.restoreOverrideCursor()
+        
         # Check if the FTP client exists and is connected before attempting to disconnect
         if self.ftp_client and self.ftp_client.is_connected:
             self.ftp_client.disconnect()
@@ -1504,21 +1617,33 @@ class FTPPanel(QWidget):
                 pass
 
     def show_message(self, message, message_type="info", auto_clear=True, timeout=5000):
-        """Display a message in the main window's message area
+        """Afișează un mesaj în zona de log și actualizează tabelele de transfer
         
         Args:
-            message (str): The message to display
-            message_type (str): The type of message (info, success, error, warning)
-            auto_clear (bool): Whether the message should be automatically cleared after a time
-            timeout (int): The time in milliseconds after which the message will be automatically cleared
+            message (str): Mesajul de afișat
+            message_type (str): Tipul mesajului (info, success, error, warning)
+            auto_clear (bool): Dacă mesajul trebuie șters automat după un anumit timp
+            timeout (int): Timpul în milisecunde după care mesajul va fi șters automat
         """
-        # Check if we have access to the main window and its show_message method
+        # Înregistrează mesajul în fișierele de log FTP
+        if hasattr(self, 'ftp_client') and self.ftp_client:
+            if hasattr(self.ftp_client, 'logger') and self.ftp_client.logger:
+                prefix = ""
+                if message_type == "error":
+                    prefix = "ERROR: "
+                elif message_type == "warning":
+                    prefix = "WARNING: "
+                elif message_type == "success":
+                    prefix = "SUCCESS: "
+                self.ftp_client.logger.log(f"{prefix}{message}")
+                
+        # Transmite mesajul către FileManager pentru actualizarea tabelelor de transfer
         if hasattr(self, 'file_manager') and self.file_manager and hasattr(self.file_manager, 'show_message'):
             self.file_manager.show_message(message, message_type, auto_clear, timeout)
-        else:
-            # Fallback for when we do not have access to the main window
-            self.status_label.setText(message)
-            
+        
+        # Afișează mesajul și în eticheta de stare
+        self.status_label.setText(message)
+
     def clear_message(self):
         """Clear the message from the main window's message area"""
         if hasattr(self, 'file_manager') and self.file_manager and hasattr(self.file_manager, 'clear_message'):
